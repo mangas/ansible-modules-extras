@@ -18,6 +18,10 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
+ANSIBLE_METADATA = {'status': ['preview'],
+                    'supported_by': 'community',
+                    'version': '1.0'}
+
 DOCUMENTATION = '''
 ---
 module: bigip_gtm_virtual_server
@@ -25,7 +29,9 @@ short_description: "Manages F5 BIG-IP GTM virtual servers"
 description:
     - "Manages F5 BIG-IP GTM virtual servers"
 version_added: "2.2"
-author: 'Michael Perzel'
+author:
+    - Michael Perzel (@perzizzle)
+    - Tim Rupp (@caphrim007)
 notes:
     - "Requires BIG-IP software version >= 11.4"
     - "F5 developed module 'bigsuds' required (see http://devcentral.f5.com)"
@@ -35,18 +41,6 @@ notes:
 requirements:
     - bigsuds
 options:
-    server:
-        description:
-            - BIG-IP host
-        required: true
-    user:
-        description:
-            - BIG-IP username
-        required: true
-    password:
-        description:
-            - BIG-IP password
-        required: true
     state:
         description:
             - Virtual server state
@@ -72,13 +66,14 @@ options:
             - Virtual server port
         required: false
         default: None
+extends_documentation_fragment: f5
 '''
 
 EXAMPLES = '''
   - name: Enable virtual server
     local_action: >
       bigip_gtm_virtual_server
-      server=192.168.0.1
+      server=192.0.2.1
       user=admin
       password=mysecret
       virtual_server_name=myname
@@ -95,10 +90,9 @@ except ImportError:
 else:
     bigsuds_found = True
 
-
-def bigip_api(server, user, password):
-    api = bigsuds.BIGIP(hostname=server, username=user, password=password)
-    return api
+from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.pycompat24 import get_exception
+from ansible.module_utils.f5 import bigip_api, f5_argument_spec
 
 
 def server_exists(api, server):
@@ -107,7 +101,8 @@ def server_exists(api, server):
     try:
         api.GlobalLB.Server.get_object_status([server])
         result = True
-    except bigsuds.OperationFailed, e:
+    except bigsuds.OperationFailed:
+        e = get_exception()
         if "was not found" in str(e):
             result = False
         else:
@@ -123,7 +118,8 @@ def virtual_server_exists(api, name, server):
         virtual_server_id = {'name': name, 'server': server}
         api.GlobalLB.VirtualServerV2.get_object_status([virtual_server_id])
         result = True
-    except bigsuds.OperationFailed, e:
+    except bigsuds.OperationFailed:
+        e = get_exception()
         if "was not found" in str(e):
             result = False
         else:
@@ -157,17 +153,19 @@ def set_virtual_server_state(api, name, server, state):
 
 
 def main():
+    argument_spec = f5_argument_spec()
+
+    meta_args = dict(
+        state=dict(type='str', default='present', choices=['present', 'absent', 'enabled', 'disabled']),
+        host=dict(type='str', default=None, aliases=['address']),
+        port=dict(type='int', default=None),
+        virtual_server_name=dict(type='str', required=True),
+        virtual_server_server=dict(type='str', required=True)
+    )
+    argument_spec.update(meta_args)
+
     module = AnsibleModule(
-        argument_spec=dict(
-            server=dict(type='str', required=True),
-            user=dict(type='str', required=True),
-            password=dict(type='str', required=True, no_log=True),
-            state=dict(type='str', default='present', choices=['present', 'absent', 'enabled', 'disabled']),
-            host=dict(type='str', default=None, aliases=['address']),
-            port=dict(type='int', default=None),
-            virtual_server_name=dict(type='str', required=True),
-            virtual_server_server=dict(type='str', required=True)
-        ),
+        argument_spec=argument_spec,
         supports_check_mode=True
     )
 
@@ -175,6 +173,8 @@ def main():
         module.fail_json(msg="the python bigsuds module is required")
 
     server = module.params['server']
+    server_port = module.params['server_port']
+    validate_certs = module.params['validate_certs']
     user = module.params['user']
     password = module.params['password']
     virtual_server_name = module.params['virtual_server_name']
@@ -186,7 +186,7 @@ def main():
     result = {'changed': False}  # default
 
     try:
-        api = bigip_api(server, user, password)
+        api = bigip_api(server, user, password, validate_certs, port=server_port)
 
         if state == 'absent':
             if virtual_server_exists(api, virtual_server_name, virtual_server_server):
@@ -232,13 +232,12 @@ def main():
                 else:
                     result = {'changed': True}
 
-    except Exception, e:
+    except Exception:
+        e = get_exception()
         module.fail_json(msg="received exception: %s" % e)
 
     module.exit_json(**result)
 
-# import module snippets
-from ansible.module_utils.basic import *
 
 if __name__ == '__main__':
     main()

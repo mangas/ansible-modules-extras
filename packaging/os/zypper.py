@@ -27,6 +27,11 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 from xml.dom.minidom import parseString as parseXML
+import re
+
+ANSIBLE_METADATA = {'status': ['preview'],
+                    'supported_by': 'committer',
+                    'version': '1.0'}
 
 DOCUMENTATION = '''
 ---
@@ -36,6 +41,7 @@ author:
     - "Alexander Gubin (@alxgu)"
     - "Thomas O'Donnell (@andytom)"
     - "Robin Roth (@robinro)"
+    - "Andrii Radyk (@AnderEnder)"
 version_added: "1.2"
 short_description: Manage packages on SUSE and openSUSE
 description:
@@ -43,7 +49,10 @@ description:
 options:
     name:
         description:
-        - package name or package specifier with version C(name) or C(name-1.0). You can also pass a url or a local path to a rpm file. When using state=latest, this can be '*', which updates all installed packages.
+        - Package name C(name) or package specifier.
+        - Can include a version like C(name=1.0), C(name>3.4) or C(name<=2.7). If a version is given, C(oldpackage) is implied and zypper is allowed to update the package within the version range given.
+        - You can also pass a url or a local path to a rpm file.
+        - When using state=latest, this can be '*', which updates all installed packages.
         required: true
         aliases: [ 'pkg' ]
     state:
@@ -72,7 +81,7 @@ options:
     disable_recommends:
         version_added: "1.8"
         description:
-          - Corresponds to the C(--no-recommends) option for I(zypper). Default behavior (C(yes)) modifies zypper's default behavior; C(no) does install recommended packages. 
+          - Corresponds to the C(--no-recommends) option for I(zypper). Default behavior (C(yes)) modifies zypper's default behavior; C(no) does install recommended packages.
         required: false
         default: "yes"
         choices: [ "yes", "no" ]
@@ -83,56 +92,131 @@ options:
         required: false
         default: "no"
         choices: [ "yes", "no" ]
+    update_cache:
+        version_added: "2.2"
+        description:
+          - Run the equivalent of C(zypper refresh) before the operation.
+        required: false
+        default: "no"
+        choices: [ "yes", "no" ]
+        aliases: [ "refresh" ]
+    oldpackage:
+        version_added: "2.2"
+        description:
+          - Adds C(--oldpackage) option to I(zypper). Allows to downgrade packages with less side-effects than force. This is implied as soon as a version is specified as part of the package name.
+        required: false
+        default: "no"
+        choices: [ "yes", "no" ]
 
 # informational: requirements for nodes
-requirements: 
+requirements:
     - "zypper >= 1.0  # included in openSuSE >= 11.1 or SuSE Linux Enterprise Server/Desktop >= 11.0"
+    - python-xml
     - rpm
 '''
 
 EXAMPLES = '''
 # Install "nmap"
-- zypper: name=nmap state=present
+- zypper:
+    name: nmap
+    state: present
 
 # Install apache2 with recommended packages
-- zypper: name=apache2 state=present disable_recommends=no
+- zypper:
+    name: apache2
+    state: present
+    disable_recommends: no
 
 # Apply a given patch
-- zypper: name=openSUSE-2016-128 state=present type=patch
+- zypper:
+    name: openSUSE-2016-128
+    state: present
+    type: patch
 
 # Remove the "nmap" package
-- zypper: name=nmap state=absent
+- zypper:
+    name: nmap
+    state: absent
 
 # Install the nginx rpm from a remote repo
-- zypper: name=http://nginx.org/packages/sles/12/x86_64/RPMS/nginx-1.8.0-1.sles12.ngx.x86_64.rpm state=present
+- zypper:
+    name: 'http://nginx.org/packages/sles/12/x86_64/RPMS/nginx-1.8.0-1.sles12.ngx.x86_64.rpm'
+    state: present
 
 # Install local rpm file
-- zypper: name=/tmp/fancy-software.rpm state=present
+- zypper:
+    name: /tmp/fancy-software.rpm
+    state: present
 
 # Update all packages
-- zypper: name=* state=latest
+- zypper:
+    name: *
+    state: latest
 
 # Apply all available patches
-- zypper: name=* state=latest type=patch
+- zypper:
+    name: *
+    state: latest
+    type: patch
+
+# Refresh repositories and update package "openssl"
+- zypper:
+    name: openssl
+    state: present
+    update_cache: yes
+
+# Install specific version (possible comparisons: <, >, <=, >=, =)
+- zypper:
+    name: 'docker>=1.10'
+    state: installed
 '''
 
 
+def split_name_version(name):
+    """splits of the package name and desired version
+
+    example formats:
+        - docker>=1.10
+        - apache=2.4
+
+    Allowed version specifiers: <, >, <=, >=, =
+    Allowed version format: [0-9.-]*
+
+    Also allows a prefix indicating remove "-", "~" or install "+"
+    """
+
+    prefix = ''
+    if name[0] in ['-', '~', '+']:
+        prefix = name[0]
+        name = name[1:]
+
+    version_check = re.compile('^(.*?)((?:<|>|<=|>=|=)[0-9.-]*)?$')
+    try:
+        reres = version_check.match(name)
+        name, version = reres.groups()
+        return prefix, name, version
+    except:
+        return prefix, name, None
+
+
 def get_want_state(m, names, remove=False):
-    packages_install = []
-    packages_remove = []
+    packages_install = {}
+    packages_remove = {}
     urls = []
     for name in names:
         if '://' in name or name.endswith('.rpm'):
             urls.append(name)
-        elif name.startswith('-') or name.startswith('~'):
-            packages_remove.append(name[1:])
-        elif name.startswith('+'):
-            packages_install.append(name[1:])
         else:
-            if remove:
-                packages_remove.append(name)
+            prefix, pname, version = split_name_version(name)
+            if prefix in ['-', '~']:
+                packages_remove[pname] = version
+            elif prefix == '+':
+                packages_install[pname] = version
             else:
-                packages_install.append(name)
+                if remove:
+                    packages_remove[pname] = version
+                else:
+                    packages_install[pname] = version
     return packages_install, packages_remove, urls
 
 
@@ -160,7 +244,7 @@ def parse_zypper_xml(m, cmd, fail_not_found=True, packages=None):
         # zypper exit codes
         # 0: success
         # 106: signature verification failed
-        # 103: zypper was upgraded, run same command again 
+        # 103: zypper was upgraded, run same command again
         if packages is None:
             firstrun = True
             packages = {}
@@ -185,14 +269,15 @@ def parse_zypper_xml(m, cmd, fail_not_found=True, packages=None):
 def get_cmd(m, subcommand):
     "puts together the basic zypper command arguments with those passed to the module"
     is_install = subcommand in ['install', 'update', 'patch']
+    is_refresh = subcommand == 'refresh'
     cmd = ['/usr/bin/zypper', '--quiet', '--non-interactive', '--xmlout']
 
     # add global options before zypper command
-    if is_install and m.params['disable_gpg_check']:
+    if (is_install or is_refresh) and m.params['disable_gpg_check']:
         cmd.append('--no-gpg-checks')
 
     cmd.append(subcommand)
-    if subcommand != 'patch':
+    if subcommand != 'patch' and not is_refresh:
         cmd.extend(['--type', m.params['type']])
     if m.check_mode and subcommand != 'search':
         cmd.append('--dry-run')
@@ -202,20 +287,24 @@ def get_cmd(m, subcommand):
             cmd.append('--no-recommends')
         if m.params['force']:
             cmd.append('--force')
+        if m.params['oldpackage']:
+            cmd.append('--oldpackage')
     return cmd
 
 
 def set_diff(m, retvals, result):
+    # TODO: if there is only one package, set before/after to version numbers
     packages = {'installed': [], 'removed': [], 'upgraded': []}
-    for p in result:
-        group = result[p]['group']
-        if group == 'to-upgrade':
-            versions = ' (' + result[p]['oldversion'] + ' => ' + result[p]['version'] + ')'
-            packages['upgraded'].append(p + versions)
-        elif group == 'to-install':
-            packages['installed'].append(p)
-        elif group == 'to-remove':
-            packages['removed'].append(p)
+    if result:
+        for p in result:
+            group = result[p]['group']
+            if group == 'to-upgrade':
+                versions = ' (' + result[p]['oldversion'] + ' => ' + result[p]['version'] + ')'
+                packages['upgraded'].append(p + versions)
+            elif group == 'to-install':
+                packages['installed'].append(p)
+            elif group == 'to-remove':
+                packages['removed'].append(p)
 
     output = ''
     for state in packages:
@@ -231,23 +320,37 @@ def set_diff(m, retvals, result):
 
 def package_present(m, name, want_latest):
     "install and update (if want_latest) the packages in name_install, while removing the packages in name_remove"
-    retvals = {'rc': 0, 'stdout': '', 'stderr': '', 'changed': False, 'failed': False}
+    retvals = {'rc': 0, 'stdout': '', 'stderr': ''}
     name_install, name_remove, urls = get_want_state(m, name)
+
+    # if a version string is given, pass it to zypper
+    install_version = [p+name_install[p] for p in name_install if name_install[p]]
+    remove_version = [p+name_remove[p] for p in name_remove if name_remove[p]]
+
+    # add oldpackage flag when a version is given to allow downgrades
+    if install_version or remove_version:
+        m.params['oldpackage'] = True
 
     if not want_latest:
         # for state=present: filter out already installed packages
-        prerun_state = get_installed_state(m, name_install + name_remove)
+        install_and_remove = name_install.copy()
+        install_and_remove.update(name_remove)
+        prerun_state = get_installed_state(m, install_and_remove)
         # generate lists of packages to install or remove
         name_install = [p for p in name_install if p not in prerun_state]
         name_remove = [p for p in name_remove if p in prerun_state]
-        if not name_install and not name_remove and not urls:
+        if not any((name_install, name_remove, urls, install_version, remove_version)):
             # nothing to install/remove and nothing to update
-            return retvals
+            return None, retvals
 
     # zypper install also updates packages
     cmd = get_cmd(m, 'install')
     cmd.append('--')
     cmd.extend(urls)
+
+    # pass packages with version information
+    cmd.extend(install_version)
+    cmd.extend(['-%s' % p for p in remove_version])
 
     # allow for + or - prefixes in install/remove lists
     # do this in one zypper run to allow for dependency-resolution
@@ -257,25 +360,15 @@ def package_present(m, name, want_latest):
 
     retvals['cmd'] = cmd
     result, retvals['rc'], retvals['stdout'], retvals['stderr'] = parse_zypper_xml(m, cmd)
-    if retvals['rc'] == 0:
-        # installed all packages successfully
-        # checking the output is not straight-forward because zypper rewrites 'capabilities'
-        # could run get_installed_state and recheck, but this takes time
-        if result:
-            retvals['changed'] = True
-    else:
-        retvals['failed'] = True
-        # return retvals
-    if m._diff:
-        set_diff(m, retvals, result)
 
-    return retvals
+    return result, retvals
 
 
-def package_update_all(m, do_patch):
+def package_update_all(m):
     "run update or patch on all available packages"
-    retvals = {'rc': 0, 'stdout': '', 'stderr': '', 'changed': False, 'failed': False}
-    if do_patch:
+    
+    retvals = {'rc': 0, 'stdout': '', 'stderr': ''}
+    if m.params['type'] == 'patch':
         cmdname = 'patch'
     else:
         cmdname = 'update'
@@ -283,19 +376,12 @@ def package_update_all(m, do_patch):
     cmd = get_cmd(m, cmdname)
     retvals['cmd'] = cmd
     result, retvals['rc'], retvals['stdout'], retvals['stderr'] = parse_zypper_xml(m, cmd)
-    if retvals['rc'] == 0:
-        if result:
-            retvals['changed'] = True
-    else:
-        retvals['failed'] = True
-    if m._diff:
-        set_diff(m, retvals, result)
-    return retvals
+    return result, retvals
 
 
 def package_absent(m, name):
     "remove the packages in name"
-    retvals = {'rc': 0, 'stdout': '', 'stderr': '', 'changed': False, 'failed': False}
+    retvals = {'rc': 0, 'stdout': '', 'stderr': ''}
     # Get package state
     name_install, name_remove, urls = get_want_state(m, name, remove=True)
     if name_install:
@@ -305,23 +391,28 @@ def package_absent(m, name):
     if m.params['type'] == 'patch':
         m.fail_json(msg="Can not remove patches.")
     prerun_state = get_installed_state(m, name_remove)
+    remove_version = [p+name_remove[p] for p in name_remove if name_remove[p]]
     name_remove = [p for p in name_remove if p in prerun_state]
-    if not name_remove:
-        return retvals
+    if not name_remove and not remove_version:
+        return None, retvals
 
     cmd = get_cmd(m, 'remove')
     cmd.extend(name_remove)
+    cmd.extend(remove_version)
 
     retvals['cmd'] = cmd
     result, retvals['rc'], retvals['stdout'], retvals['stderr'] = parse_zypper_xml(m, cmd)
-    if retvals['rc'] == 0:
-        # removed packages successfully
-        if result:
-            retvals['changed'] = True
-    else:
-        retvals['failed'] = True
-    if m._diff:
-        set_diff(m, retvals, result)
+    return result, retvals
+
+
+def repo_refresh(m):
+    "update the repositories"
+    retvals = {'rc': 0, 'stdout': '', 'stderr': ''}
+
+    cmd = get_cmd(m, 'refresh')
+
+    retvals['cmd'] = cmd
+    result, retvals['rc'], retvals['stdout'], retvals['stderr'] = parse_zypper_xml(m, cmd)
 
     return retvals
 
@@ -337,37 +428,50 @@ def main():
             disable_gpg_check = dict(required=False, default='no', type='bool'),
             disable_recommends = dict(required=False, default='yes', type='bool'),
             force = dict(required=False, default='no', type='bool'),
+            update_cache = dict(required=False, aliases=['refresh'], default='no', type='bool'),
+            oldpackage = dict(required=False, default='no', type='bool'),
         ),
         supports_check_mode = True
     )
 
     name = module.params['name']
     state = module.params['state']
+    update_cache = module.params['update_cache']
+
+    # remove empty strings from package list
+    name = filter(None, name)
+
+    # Refresh repositories
+    if update_cache:
+        retvals = repo_refresh(module)
+
+        if retvals['rc'] != 0:
+            module.fail_json(msg="Zypper refresh run failed.", **retvals)
 
     # Perform requested action
     if name == ['*'] and state == 'latest':
-        if module.params['type'] == 'package':
-            retvals = package_update_all(module, False)
-        elif module.params['type'] == 'patch':
-            retvals = package_update_all(module, True)
+        packages_changed, retvals = package_update_all(module)
     else:
         if state in ['absent', 'removed']:
-            retvals = package_absent(module, name)
+            packages_changed, retvals = package_absent(module, name)
         elif state in ['installed', 'present', 'latest']:
-            retvals = package_present(module, name, state == 'latest')
+            packages_changed, retvals = package_present(module, name, state == 'latest')
 
-    failed = retvals['failed']
-    del retvals['failed']
+    retvals['changed'] = retvals['rc'] == 0 and bool(packages_changed)
 
-    if failed:
+    if module._diff:
+        set_diff(module, retvals, packages_changed)
+
+    if retvals['rc'] != 0:
         module.fail_json(msg="Zypper run failed.", **retvals)
 
     if not retvals['changed']:
         del retvals['stdout']
         del retvals['stderr']
 
-    module.exit_json(name=name, state=state, **retvals)
+    module.exit_json(name=name, state=state, update_cache=update_cache, **retvals)
 
 # import module snippets
-from ansible.module_utils.basic import *
-main()
+from ansible.module_utils.basic import AnsibleModule
+if __name__ == "__main__":
+    main()

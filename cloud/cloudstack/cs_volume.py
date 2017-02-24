@@ -19,6 +19,10 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible. If not, see <http://www.gnu.org/licenses/>.
 
+ANSIBLE_METADATA = {'status': ['stableinterface'],
+                    'supported_by': 'community',
+                    'version': '1.0'}
+
 DOCUMENTATION = '''
 ---
 module: cs_volume
@@ -387,7 +391,7 @@ class AnsibleCloudStackVolume(AnsibleCloudStack):
         volume = self.get_volume()
 
         if volume:
-            if 'attached' in volume and not self.module.param.get('force'):
+            if 'attached' in volume and not self.module.params.get('force'):
                 self.module.fail_json(msg="Volume '%s' is attached, use force=true for detaching and removing the volume." % volume.get('name'))
 
             self.result['changed'] = True

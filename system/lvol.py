@@ -18,6 +18,10 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
+ANSIBLE_METADATA = {'status': ['preview'],
+                    'supported_by': 'community',
+                    'version': '1.0'}
+
 DOCUMENTATION = '''
 ---
 author:
@@ -48,8 +52,15 @@ options:
     choices: [ "present", "absent" ]
     default: present
     description:
-    - Control if the logical volume exists. If C(present) the C(size) option
-      is required.
+    - Control if the logical volume exists. If C(present) and the
+      volume does not already exist then the C(size) option is required.
+    required: false
+  active:
+    version_added: "2.2"
+    choices: [ "yes", "no" ]
+    default: "yes"
+    description:
+    - Whether the volume is activate and visible to the host.
     required: false
   force:
     version_added: "1.5"
@@ -85,46 +96,109 @@ notes:
 
 EXAMPLES = '''
 # Create a logical volume of 512m.
-- lvol: vg=firefly lv=test size=512
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512
 
 # Create a logical volume of 512m with disks /dev/sda and /dev/sdb
-- lvol: vg=firefly lv=test size=512 pvs=/dev/sda,/dev/sdb
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512
+    pvs: /dev/sda,/dev/sdb
 
 # Create cache pool logical volume
-- lvol: vg=firefly lv=lvcache size=512m opts='--type cache-pool'
+- lvol:
+    vg: firefly
+    lv: lvcache
+    size: 512m
+    opts: --type cache-pool
 
 # Create a logical volume of 512g.
-- lvol: vg=firefly lv=test size=512g
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512g
 
 # Create a logical volume the size of all remaining space in the volume group
-- lvol: vg=firefly lv=test size=100%FREE
+- lvol:
+    vg: firefly
+    lv: test
+    size: 100%FREE
 
 # Create a logical volume with special options
-- lvol: vg=firefly lv=test size=512g opts="-r 16"
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512g
+    opts: -r 16
 
 # Extend the logical volume to 1024m.
-- lvol: vg=firefly lv=test size=1024
+- lvol:
+    vg: firefly
+    lv: test
+    size: 1024
 
 # Extend the logical volume to consume all remaining space in the volume group
-- lvol: vg=firefly lv=test size=+100%FREE
+- lvol:
+    vg: firefly
+    lv: test
+    size: +100%FREE
 
 # Extend the logical volume to take all remaining space of the PVs
-- lvol: vg=firefly lv=test size=100%PVS
+- lvol:
+    vg: firefly
+    lv: test
+    size: 100%PVS
 
 # Resize the logical volume to % of VG
-- lvol: vg-firefly lv=test size=80%VG force=yes
+- lvol:
+    vg: firefly
+    lv: test
+    size: 80%VG
+    force: yes
 
 # Reduce the logical volume to 512m
-- lvol: vg=firefly lv=test size=512 force=yes
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512
+    force: yes
 
 # Set the logical volume to 512m and do not try to shrink if size is lower than current one
-- lvol: vg=firefly lv=test size=512 shrink=no
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512
+    shrink: no
 
 # Remove the logical volume.
-- lvol: vg=firefly lv=test state=absent force=yes
+- lvol:
+    vg: firefly
+    lv: test
+    state: absent
+    force: yes
 
 # Create a snapshot volume of the test logical volume.
-- lvol: vg=firefly lv=test snapshot=snap1 size=100m
+- lvol:
+    vg: firefly
+    lv: test
+    snapshot: snap1
+    size: 100m
+
+# Deactivate a logical volume
+- lvol:
+    vg: firefly
+    lv: test
+    active: false
+
+# Create a deactivated logical volume
+- lvol:
+    vg: firefly
+    lv: test
+    size: 512g
+    active: false
 '''
 
 import re
@@ -140,7 +214,8 @@ def parse_lvs(data):
         parts = line.strip().split(';')
         lvs.append({
             'name': parts[0].replace('[','').replace(']',''),
-            'size': int(decimal_point.match(parts[1]).group(1))
+            'size': int(decimal_point.match(parts[1]).group(1)),
+            'active': (parts[2][4] == 'a')
         })
     return lvs
 
@@ -178,6 +253,7 @@ def main():
             state=dict(choices=["absent", "present"], default='present'),
             force=dict(type='bool', default='no'),
             shrink=dict(type='bool', default='yes'),
+            active=dict(type='bool', default='yes'),
             snapshot=dict(type='str', default=None),
             pvs=dict(type='str')
         ),
@@ -201,6 +277,7 @@ def main():
     state = module.params['state']
     force = module.boolean(module.params['force'])
     shrink = module.boolean(module.params['shrink'])
+    active = module.boolean(module.params['active'])
     size_opt = 'L'
     size_unit = 'm'
     snapshot = module.params['snapshot']
@@ -260,7 +337,7 @@ def main():
 
     if rc != 0:
         if state == 'absent':
-            module.exit_json(changed=False, stdout="Volume group %s does not exist." % vg, stderr=False)
+            module.exit_json(changed=False, stdout="Volume group %s does not exist." % vg)
         else:
             module.fail_json(msg="Volume group %s does not exist." % vg, rc=rc, err=err)
 
@@ -270,11 +347,11 @@ def main():
     # Get information on logical volume requested
     lvs_cmd = module.get_bin_path("lvs", required=True)
     rc, current_lvs, err = module.run_command(
-        "%s -a --noheadings --nosuffix -o lv_name,size --units %s --separator ';' %s" % (lvs_cmd, unit, vg))
+        "%s -a --noheadings --nosuffix -o lv_name,size,lv_attr --units %s --separator ';' %s" % (lvs_cmd, unit, vg))
 
     if rc != 0:
         if state == 'absent':
-            module.exit_json(changed=False, stdout="Volume group %s does not exist." % vg, stderr=False)
+            module.exit_json(changed=False, stdout="Volume group %s does not exist." % vg)
         else:
             module.fail_json(msg="Volume group %s does not exist." % vg, rc=rc, err=err)
 
@@ -296,8 +373,6 @@ def main():
     if state == 'present' and not size:
         if this_lv is None:
             module.fail_json(msg="No size given.")
-        else:
-            module.exit_json(changed=False, vg=vg, lv=this_lv['name'], size=this_lv['size'])
 
     msg = ''
     if this_lv is None:
@@ -324,6 +399,9 @@ def main():
                 module.exit_json(changed=True)
             else:
                 module.fail_json(msg="Failed to remove logical volume %s" % (lv), rc=rc, err=err)
+
+        elif not size:
+            pass
 
         elif size_opt == 'l':
             ### Resize LV based on % value
@@ -391,6 +469,22 @@ def main():
                     module.exit_json(changed=False, vg=vg, lv=this_lv['name'], size=this_lv['size'], msg="Original size is larger than requested size", err=err)
                 else:
                     module.fail_json(msg="Unable to resize %s to %s%s" % (lv, size, size_unit), rc=rc, err=err)
+
+    if this_lv is not None:
+        if active:
+            lvchange_cmd = module.get_bin_path("lvchange", required=True)
+            rc, _, err = module.run_command("%s -ay %s/%s" % (lvchange_cmd, vg, this_lv['name']))
+            if rc == 0:
+                module.exit_json(changed=((not this_lv['active']) or changed), vg=vg, lv=this_lv['name'], size=this_lv['size'])
+            else:
+                module.fail_json(msg="Failed to activate logical volume %s" % (lv), rc=rc, err=err)
+        else:
+            lvchange_cmd = module.get_bin_path("lvchange", required=True)
+            rc, _, err = module.run_command("%s -an %s/%s" % (lvchange_cmd, vg, this_lv['name']))
+            if rc == 0:
+                module.exit_json(changed=(this_lv['active'] or changed), vg=vg, lv=this_lv['name'], size=this_lv['size'])
+            else:
+                module.fail_json(msg="Failed to deactivate logical volume %s" % (lv), rc=rc, err=err)
 
     module.exit_json(changed=changed, msg=msg)
 

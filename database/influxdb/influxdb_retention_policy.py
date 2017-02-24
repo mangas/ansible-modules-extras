@@ -17,6 +17,10 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
+ANSIBLE_METADATA = {'status': ['preview'],
+                    'supported_by': 'community',
+                    'version': '1.0'}
+
 DOCUMENTATION = '''
 ---
 module: influxdb_retention_policy
@@ -125,7 +129,7 @@ def influxdb_argument_spec():
         port=dict(default=8086, type='int'),
         username=dict(default='root', type='str'),
         password=dict(default='root', type='str', no_log=True),
-        database_name=dict(default=None, type='str')
+        database_name=dict(required=True, type='str')
     )
 
 
@@ -195,7 +199,7 @@ def alter_retention_policy(module, client, retention_policy):
     elif duration_lookup.group(2) == 'w':
         influxdb_duration_format = '%sh0m0s' % (int(duration_lookup.group(1)) * 24 * 7)
     elif duration == 'INF':
-        influxdb_duration_format = 'INF'
+        influxdb_duration_format = '0'
 
     if not retention_policy['duration'] == influxdb_duration_format or not retention_policy['replicaN'] == int(replication) or not retention_policy['default'] == default:
         if not module.check_mode:
